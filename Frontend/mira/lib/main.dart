@@ -9,15 +9,19 @@ import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'design/mira_icons.dart';
 import 'dog_room/controllers/dog_controller.dart';
+import 'dog_room/services/character_save_service.dart';
 import 'dog_room/services/dog_save_service.dart';
 import 'dog_room/screens/dog_room_screen.dart';
 import 'firebase_options.dart';
 import 'memories/memory_page.dart';
+import 'mood/mood_diary_sheet.dart';
 import 'privacy/privacy_screen.dart';
 import 'services/ai_server_service.dart';
 import 'services/auth_service.dart';
+import 'services/character_server_service.dart';
 import 'services/family_service.dart';
 import 'services/moment_service.dart';
+import 'services/notification_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -730,12 +734,45 @@ class _PetSetupState extends State<PetSetup> {
   final List<Uint8List> _photoBytes = [];
   bool _analyzing = false;
   String? _analysisError;
+  Uint8List? _characterImage;
+  bool _generatingCharacter = false;
+  String? _characterError;
+  int _characterSeed = 42;
 
   @override
   void dispose() {
     _breedController.dispose();
     _colorController.dispose();
     super.dispose();
+  }
+
+  Future<void> _generateCharacter({bool reroll = false}) async {
+    final breed = _breedController.text.trim();
+    final color = _colorController.text.trim();
+    if (breed.isEmpty || color.isEmpty) {
+      setState(() => _characterError = '견종과 색상을 먼저 입력해주세요.');
+      return;
+    }
+    if (reroll) _characterSeed = DateTime.now().millisecondsSinceEpoch % 100000;
+    setState(() {
+      _generatingCharacter = true;
+      _characterError = null;
+    });
+    try {
+      final bytes = await CharacterServerService.instance.generate(
+        breed: breed,
+        color: color,
+        personality: personality,
+        seed: _characterSeed,
+      );
+      setState(() => _characterImage = bytes);
+    } on CharacterServerException catch (e) {
+      setState(() => _characterError = e.message);
+    } catch (_) {
+      setState(() => _characterError = '캐릭터를 만들지 못했어요. 잠시 후 다시 시도해주세요.');
+    } finally {
+      if (mounted) setState(() => _generatingCharacter = false);
+    }
   }
 
   Future<void> _pickPhotos() async {
@@ -920,6 +957,50 @@ class _PetSetupState extends State<PetSetup> {
               )
               .toList(),
         ),
+        const SizedBox(height: 22),
+        const Text('AI 캐릭터', style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 4),
+        const Text(
+          '견종·색상·성격으로 우리 아이만의 마스코트를 만들어요.',
+          style: TextStyle(color: Colors.black45, fontSize: 12),
+        ),
+        const SizedBox(height: 10),
+        if (_characterImage != null)
+          ClipRRect(
+            borderRadius: BorderRadius.circular(22),
+            child: Container(
+              color: const Color(0xFFEDE9F8),
+              padding: const EdgeInsets.all(12),
+              child: Image.memory(_characterImage!, height: 160),
+            ),
+          ),
+        if (_characterError != null) ...[
+          const SizedBox(height: 8),
+          Text(_characterError!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+        ],
+        const SizedBox(height: 10),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: _generatingCharacter
+                ? null
+                : () => _generateCharacter(reroll: _characterImage != null),
+            icon: _generatingCharacter
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(CupertinoIcons.wand_stars),
+            label: Text(
+              _generatingCharacter
+                  ? '만드는 중...'
+                  : _characterImage == null
+                  ? 'AI 캐릭터 만들기'
+                  : '다시 만들기',
+            ),
+          ),
+        ),
         const SizedBox(height: 18),
         const TextField(
           decoration: InputDecoration(labelText: '이름', hintText: '보리'),
@@ -928,7 +1009,13 @@ class _PetSetupState extends State<PetSetup> {
         SizedBox(
           width: double.infinity,
           child: FilledButton(
-            onPressed: widget.onDone,
+            onPressed: () async {
+              final image = _characterImage;
+              if (image != null) {
+                await CharacterSaveService.instance.save(image);
+              }
+              widget.onDone();
+            },
             style: FilledButton.styleFrom(padding: const EdgeInsets.all(18)),
             child: const Text('MIRA 시작하기'),
           ),
@@ -1002,6 +1089,7 @@ class _MainShellState extends State<MainShell> {
     final pages = [
       HomePage(
         onAttendance: _attendance,
+        onMoodDiary: () => showMoodDiarySheet(context),
         dog: dog,
         active: index == 0,
         onOpenPet: () => setState(() => index = 1),
@@ -1014,7 +1102,12 @@ class _MainShellState extends State<MainShell> {
     ];
     return Scaffold(
       body: SafeArea(
-        child: IndexedStack(index: index, children: pages),
+        child: Stack(
+          children: [
+            IndexedStack(index: index, children: pages),
+            const _MoodAlertListener(),
+          ],
+        ),
       ),
       bottomNavigationBar: NavigationBar(
         height: 76,
@@ -1096,9 +1189,74 @@ class AppPage extends StatelessWidget {
   );
 }
 
+/// 다른 가족 구성원이 "오늘의 감정 한 줄 기록"에서 힘든 마음을 남기면,
+/// AI가 요약한 소식을 화면 어디에 있든 팝업으로 보여준다.
+class _MoodAlertListener extends StatelessWidget {
+  const _MoodAlertListener();
+
+  @override
+  Widget build(BuildContext context) {
+    // IndexedStack 밖(항상 그려지는 자리)에 있는 위젯이라, Firebase 미설정 플랫폼에서
+    // FirebaseAuth.instance가 던지는 예외를 여기서 막지 않으면 에러 박스가 모든 탭 위에
+    // 덮어씌워진다. main()의 Firebase.initializeApp try/catch와 같은 이유.
+    String? maybeUid;
+    try {
+      maybeUid = FirebaseAuth.instance.currentUser?.uid;
+    } catch (_) {
+      return const SizedBox.shrink();
+    }
+    final uid = maybeUid;
+    if (uid == null) return const SizedBox.shrink();
+    return StreamBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+      stream: NotificationService.instance.watchUnread(uid),
+      builder: (context, snapshot) {
+        final docs = snapshot.data ?? const [];
+        if (docs.isEmpty) return const SizedBox.shrink();
+        final first = docs.first;
+        WidgetsBinding.instance.addPostFrameCallback((_) async {
+          if (!context.mounted) return;
+          await NotificationService.instance.markRead(uid, first.id);
+          if (!context.mounted) return;
+          await showDialog<void>(
+            context: context,
+            builder: (c) => AlertDialog(
+              title: Text(first.data()['title'] as String? ?? '가족 소식'),
+              content: Text(first.data()['message'] as String? ?? ''),
+              actions: [
+                FilledButton(
+                  onPressed: () => Navigator.pop(c),
+                  child: const Text('확인'),
+                ),
+              ],
+            ),
+          );
+        });
+        return const SizedBox.shrink();
+      },
+    );
+  }
+}
+
+/// PetSetup에서 AI로 만든 캐릭터 이미지가 있으면 작은 원형 프로필로 보여준다.
+/// 없으면 아무것도 그리지 않는다 ("직접 꾸미기"로 건너뛴 경우 등).
+class _CharacterAvatar extends StatelessWidget {
+  const _CharacterAvatar();
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<Uint8List?>(
+    future: CharacterSaveService.instance.load(),
+    builder: (context, snapshot) {
+      final bytes = snapshot.data;
+      if (bytes == null) return const SizedBox.shrink();
+      return CircleAvatar(radius: 18, backgroundImage: MemoryImage(bytes));
+    },
+  );
+}
+
 class HomePage extends StatelessWidget {
   const HomePage({
     required this.onAttendance,
+    required this.onMoodDiary,
     required this.dog,
     required this.active,
     required this.onOpenPet,
@@ -1108,6 +1266,7 @@ class HomePage extends StatelessWidget {
   final bool active;
   final VoidCallback onOpenPet;
   final VoidCallback onAttendance;
+  final VoidCallback onMoodDiary;
   @override
   Widget build(BuildContext context) => AppPage(
     title: 'MIRA',
@@ -1150,6 +1309,8 @@ class HomePage extends StatelessWidget {
         const SizedBox(height: 20),
         Row(
           children: [
+            const _CharacterAvatar(),
+            const SizedBox(width: 8),
             const Expanded(
               child: Text(
                 '우리 집 작은 친구',
@@ -1218,7 +1379,7 @@ class HomePage extends StatelessWidget {
         const SizedBox(height: 12),
         const DailyQuest(icon: '🦮', title: '보리와 15분 산책', done: true),
         const SizedBox(height: 8),
-        const DailyQuest(icon: '✍️', title: '오늘의 감정 한 줄 기록', done: true),
+        DailyQuest(icon: '✍️', title: '오늘의 감정 한 줄 기록', done: false, onTap: onMoodDiary),
         const SizedBox(height: 8),
         const DailyQuest(icon: '💬', title: '가족 일기에 반응 남기기', done: false),
         const SizedBox(height: 28),
@@ -1824,48 +1985,54 @@ class DailyQuest extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.done,
+    this.onTap,
     super.key,
   });
   final String icon, title;
   final bool done;
+  final VoidCallback? onTap;
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(20),
-      border: Border.all(color: const Color(0xFFEAE6DF)),
-    ),
-    child: Row(
-      children: [
-        Text(icon, style: const TextStyle(fontSize: 21)),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Text(
-            title,
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: done ? const Color(0xFF928E87) : ink,
-              decoration: done ? TextDecoration.lineThrough : null,
+  Widget build(BuildContext context) => InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(20),
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFFEAE6DF)),
+      ),
+      child: Row(
+        children: [
+          Text(icon, style: const TextStyle(fontSize: 21)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              title,
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: done ? const Color(0xFF928E87) : ink,
+                decoration: done ? TextDecoration.lineThrough : null,
+              ),
             ),
           ),
-        ),
-        Container(
-          width: 28,
-          height: 28,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: done ? ink : Colors.transparent,
-            border: Border.all(
-              color: done ? ink : const Color(0xFFD7D2CA),
-              width: 1.5,
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: done ? ink : Colors.transparent,
+              border: Border.all(
+                color: done ? ink : const Color(0xFFD7D2CA),
+                width: 1.5,
+              ),
             ),
+            child: done
+                ? const Icon(Icons.check, color: Colors.white, size: 16)
+                : null,
           ),
-          child: done
-              ? const Icon(Icons.check, color: Colors.white, size: 16)
-              : null,
-        ),
-      ],
+        ],
+      ),
     ),
   );
 }

@@ -1,6 +1,20 @@
-# 백엔드 진행 상황 (2026-09-06 기준)
+# 백엔드 진행 상황 (2026-09-07 기준)
 
 ## 완료
+
+### mira 감정 일기 · 가족 알림 연동 (`emotion/kobert_training_emotion_cleaned.ipynb` 이식)
+- 홈 화면 "오늘의 감정 한 줄 기록"(`Frontend/mira/lib/mood/mood_diary_sheet.dart`)에서 기분 태그 + 한 줄 기록을 입력하면 `ai-server`의 `/analyze-mood`를 호출해 kobert 감정 분류 + Gemini 공감 메시지를 받아온다.
+- `families/{familyId}/moods`에 저장(`services/mood_service.dart`), 분석 결과가 "기쁨"이 아니면 다른 가족 구성원의 `users/{uid}/notifications`에 `moodAlert` 알림을 남긴다(`services/notification_service.dart`) — 일기 원문은 저장/전달하지 않고 Gemini가 만든 `family_message`(요약)만 전달.
+- `MainShell`에 알림 리스너(`_MoodAlertListener`)를 추가해서 앱 어느 화면에 있든 새 `moodAlert`가 오면 팝업으로 띄운다.
+- 기존 FamilyPage "오늘의 마음 기록"(`moments`)은 원문이 가족에게 그대로 공개되는 별도 기능이라 그대로 두고 건드리지 않음.
+- `Backend/firestore.rules`의 `users/{userId}/notifications`가 원래 "생성은 Cloud Functions에서만"이라 `moodAlert`를 클라이언트에서 못 보내는 문제 발견 → `createFamily`/`joinFamily`와 같은 이유(Blaze 미전환)로 같은 가족 구성원 대상 `moodAlert`만 필드/타입을 제한해서 클라이언트 직접 생성 예외 허용하도록 규칙 수정 (`firestore-schema.md`에도 반영). **다른 rules와 마찬가지로 아직 에뮬레이터 검증·실제 배포 안 됨.**
+- ⚠️ `EMOTION_MODEL_PATH`가 아직 파인튜닝 안 된 기본 모델이라 실제 감정 분류는 무의미한 상태 그대로임 (아래 미완료 항목 참고).
+
+### 강아지 캐릭터 생성 (`emotion/photo.ipynb` 이식, `Backend/character-server/`)
+- `emotion/photo.ipynb`(Stable Diffusion 1.5 + rembg, 견종/색상/성격 → 마스코트 이미지)를 `Backend/character-server/app.py`로 정리해서 옮김. 노트북 파일 자체의 인코딩이 깨져 있어 한글 딕셔너리 키(BREED_MAP 등)는 새로 정리함 — `character-server/README.md` 참고.
+- PetSetup 화면(반려견 프로필 설정)에 "AI 캐릭터 만들기" 버튼을 추가해서 `/generate`를 호출하고, 결과 이미지를 미리보기 후 저장하면 홈 화면 아바타로 표시된다(`character_save_service.dart`, 기기 로컬 저장).
+- `emotion/FINAL.ipynb`의 LoRA 파인튜닝(실제 반려견 사진으로 학습)은 포함하지 않음 — GPU로 수 분 이상 걸리는 오프라인 작업이라 실시간 앱 흐름에 안 맞음. 대신 "사진으로 만들기"는 기존 `/analyze-pet-photo`(품종/색상 추출) 결과를 그대로 `/generate`에 넘기는 절충안으로 구현.
+- ⚠️ **GPU가 필요해서 로컬/이 저장소만으로는 실행 불가** — Colab에서 띄우고 ngrok 주소를 앱에 설정해야 실제로 이미지가 생성됨 (README의 실행 방법 참고). 이 세션에서는 GPU가 없어 실제 생성 테스트는 못 했고, `dart analyze`/`flutter test`만 통과 확인함.
 
 ### AI 서버 (`Backend/ai-server/`)
 - Colab 프로토타입(감정 분석 + 공감 메시지 생성)을 실제 FastAPI 서비스로 이전

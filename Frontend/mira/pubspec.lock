@@ -300,10 +300,10 @@ packages:
     dependency: transitive
     description:
       name: image_picker_android
-      sha256: d5b3e1774af29c9ab00103afb0d4614070f924d2e0057ac867ec98800114793f
+      sha256: "1c0c38790306fda4ed774095620444333e56a2b6bc8fc98f3a35c9398781cf54"
       url: "https://pub.dev"
     source: hosted
-    version: "0.8.13+17"
+    version: "0.8.13+22"
   image_picker_for_web:
     dependency: transitive
     description:
@@ -476,10 +476,10 @@ packages:
     dependency: transitive
     description:
       name: shared_preferences_android
-      sha256: e8d4762b1e2e8578fc4d0fd548cebf24afd24f49719c08974df92834565e2c53
+      sha256: "1e12aafe408aa50da80edfd679a2a6bf63ba7ab37c7fa98286da459a757b3399"
       url: "https://pub.dev"
     source: hosted
-    version: "2.4.23"
+    version: "2.4.28"
   shared_preferences_foundation:
     dependency: transitive
     description:
@@ -614,5 +614,5 @@ packages:
     source: hosted
     version: "1.1.0"
 sdks:
-  dart: ">=3.11.5 <4.0.0"
-  flutter: ">=3.38.0"
+  dart: ">=3.12.0 <4.0.0"
+  flutter: ">=3.44.0"
