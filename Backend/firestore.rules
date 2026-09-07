@@ -28,7 +28,17 @@ service cloud.firestore {
 
       match /notifications/{notificationId} {
         allow read, update: if signedIn() && request.auth.uid == userId;
-        allow create, delete: if false; // Cloud Functions에서만 생성
+        allow delete: if false;
+        // moodAlert만 예외적으로 클라이언트에서 직접 생성 허용 (createFamily/joinFamily와 같은 이유로
+        // Cloud Functions 배포 전까지 임시 조치 — Blaze 요금제 전환 시 Cloud Function으로 옮길 것).
+        // 같은 가족 구성원에게만, 정해진 필드로만, 안 읽음 상태로만 보낼 수 있게 제한한다.
+        allow create: if signedIn() &&
+          request.auth.uid != userId &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.familyId ==
+            get(/databases/$(database)/documents/users/$(userId)).data.familyId &&
+          request.resource.data.keys().hasOnly(['type', 'title', 'message', 'isRead', 'relatedId', 'createdAt']) &&
+          request.resource.data.type == 'moodAlert' &&
+          request.resource.data.isRead == false;
       }
     }
 
