@@ -45,8 +45,23 @@ text, submittedAt — 문서 id를 userId로 고정해서 "가족 전원 답변 
 ### `families/{familyId}/garden` (단일 문서, 가족 전체 공유)
 cookieCount(int), progress(0~1 float), level(int), updatedAt — mood/answer 제출 시 Cloud Function이 트랜잭션으로 갱신(클라이언트 직접 쓰기 금지, race condition 방지).
 
+### `families/{familyId}/pet/profile` (단일 문서, 가족 전체 공유)
+name, breed, colorDescription, personality, updatedBy(uid), updatedAt — 반려동물은 가족당 하나. 아무 구성원이나 생성/수정 가능(한 명이 설정하면 가족 전체에 반영되고, 설정 화면에서 누구든 다시 열어 수정 가능).
+
+### `families/{familyId}/dailyCare/{yyyy-MM-dd}` (mira 홈 화면 "오늘의 가족 돌봄")
+문서 하나가 하루치. 필드는 `{uid}: {action: string, completedAt: timestamp | null}` 형태의 uid→기록 맵. `completedAt`이 null이면 오늘 할 일을 고르기만 하고 아직 실제로 하지 않은 상태(강아지 게임에서 해당 행동을 하면 서버 타임스탬프로 채워짐). 본인 uid 항목만 생성/수정 가능(다른 사람 항목 변경 불가). 홈 화면에서 실제 가족 구성원 목록과 합쳐서 "대기/진행 중/완료" 표시.
+
 ### `families/{familyId}/moments/{momentId}` (mira "가족 이야기" 탭)
-authorUid, authorName, authorRole, mood(한 줄 기분), body(내용), likedBy(array\<uid\>), commentCount(현재 UI에 댓글 작성 기능이 없어 0 고정), createdAt — 생성은 본인 uid로만, 수정은 `likedBy` 필드만 허용(좋아요 토글 전용, 그 외 필드는 생성 후 불변).
+authorUid, authorName, authorRole, mood(한 줄 기분), body(내용), likedBy(array\<uid\>), createdAt — 생성은 본인 uid로만, 수정은 `likedBy` 필드만 허용(좋아요 토글 전용, 그 외 필드는 생성 후 불변).
+
+#### `.../moments/{momentId}/comments/{commentId}`
+authorUid, authorName, authorRole, text, createdAt — 가족 구성원 누구나 생성 가능(본인 uid로만), 수정·삭제는 불가. 댓글 개수는 별도 카운터 없이 서브컬렉션 실시간 구독으로 표시.
+
+### `families/{familyId}/photos/{photoId}` (mira "사진첩" 탭)
+authorUid, authorName, authorRole, photo(base64 인코딩된 이미지, Firestore 문서 1MiB 제한 때문에 업로드 시 압축), body(글), likedBy(array\<uid\>), createdAt — 사진 여러 장을 고르면 장당 하나의 문서로 저장(문서당 이미지 1장). 생성은 본인 uid로만, 수정은 `likedBy`만 허용, 삭제는 작성자 본인만 가능.
+
+#### `.../photos/{photoId}/comments/{commentId}`
+authorUid, authorName, authorRole, text, createdAt — moments 댓글과 동일한 정책(생성만 가능, 수정·삭제 불가).
 
 ## 타임캡슐
 별도 컬렉션 없음 — `moods`/`answers`를 date 기준(오늘 - 1년)으로 조회해서 구성. 화면에서 필요한 "1년 전 오늘" 쿼리를 Cloud Function으로 감쌀지, 클라이언트에서 직접 range query할지는 추후 결정.

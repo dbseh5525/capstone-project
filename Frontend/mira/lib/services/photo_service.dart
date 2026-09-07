@@ -1,34 +1,34 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-class MomentService {
-  MomentService._();
-  static final instance = MomentService._();
+class PhotoService {
+  PhotoService._();
+  static final instance = PhotoService._();
 
   final _firestore = FirebaseFirestore.instance;
 
   CollectionReference<Map<String, dynamic>> _collection(String familyId) =>
-      _firestore.collection('families').doc(familyId).collection('moments');
+      _firestore.collection('families').doc(familyId).collection('photos');
 
-  Stream<List<QueryDocumentSnapshot<Map<String, dynamic>>>> watchMoments(String familyId) {
+  Stream<List<QueryDocumentSnapshot<Map<String, dynamic>>>> watchPhotos(String familyId) {
     return _collection(familyId)
         .orderBy('createdAt', descending: true)
         .snapshots()
         .map((snapshot) => snapshot.docs);
   }
 
-  Future<void> addMoment({
+  Future<void> addPhoto({
     required String familyId,
     required String authorUid,
     required String authorName,
     required String authorRole,
-    required String mood,
+    required String photoBase64,
     required String body,
   }) {
     return _collection(familyId).add({
       'authorUid': authorUid,
       'authorName': authorName,
       'authorRole': authorRole,
-      'mood': mood,
+      'photo': photoBase64,
       'body': body,
       'likedBy': <String>[],
       'createdAt': FieldValue.serverTimestamp(),
@@ -37,23 +37,27 @@ class MomentService {
 
   Future<void> toggleLike({
     required String familyId,
-    required String momentId,
+    required String photoId,
     required String uid,
     required bool currentlyLiked,
   }) {
-    return _collection(familyId).doc(momentId).update({
+    return _collection(familyId).doc(photoId).update({
       'likedBy': currentlyLiked
           ? FieldValue.arrayRemove([uid])
           : FieldValue.arrayUnion([uid]),
     });
   }
 
+  Future<void> deletePhoto({required String familyId, required String photoId}) {
+    return _collection(familyId).doc(photoId).delete();
+  }
+
   Stream<List<QueryDocumentSnapshot<Map<String, dynamic>>>> watchComments(
     String familyId,
-    String momentId,
+    String photoId,
   ) {
     return _collection(familyId)
-        .doc(momentId)
+        .doc(photoId)
         .collection('comments')
         .orderBy('createdAt')
         .snapshots()
@@ -62,13 +66,13 @@ class MomentService {
 
   Future<void> addComment({
     required String familyId,
-    required String momentId,
+    required String photoId,
     required String authorUid,
     required String authorName,
     required String authorRole,
     required String text,
   }) {
-    return _collection(familyId).doc(momentId).collection('comments').add({
+    return _collection(familyId).doc(photoId).collection('comments').add({
       'authorUid': authorUid,
       'authorName': authorName,
       'authorRole': authorRole,
