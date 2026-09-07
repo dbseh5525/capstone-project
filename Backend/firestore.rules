@@ -81,6 +81,23 @@ service cloud.firestore {
         allow write: if false; // Cloud Functions 트랜잭션에서만 갱신
       }
 
+      match /pet/{petDocId} {
+        // 반려동물은 가족 공유 - 누구든 만들고 수정할 수 있음(한 명이 설정하면 가족 전체에 반영)
+        allow read: if isFamilyMember(familyId);
+        allow create, update: if isFamilyMember(familyId);
+        allow delete: if false;
+      }
+
+      match /dailyCare/{dateId} {
+        // 문서는 uid를 키로 하는 맵 - 본인 uid 항목만 쓰거나 바꿀 수 있음
+        allow read: if isFamilyMember(familyId);
+        allow create: if isFamilyMember(familyId) &&
+          request.resource.data.keys().hasOnly([request.auth.uid]);
+        allow update: if isFamilyMember(familyId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([request.auth.uid]);
+        allow delete: if false;
+      }
+
       match /moments/{momentId} {
         allow read: if isFamilyMember(familyId);
         allow create: if isFamilyMember(familyId) && request.resource.data.authorUid == request.auth.uid;
@@ -88,6 +105,27 @@ service cloud.firestore {
         allow update: if isFamilyMember(familyId) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likedBy']);
         allow delete: if false;
+
+        match /comments/{commentId} {
+          allow read: if isFamilyMember(familyId);
+          allow create: if isFamilyMember(familyId) && request.resource.data.authorUid == request.auth.uid;
+          allow update, delete: if false;
+        }
+      }
+
+      match /photos/{photoId} {
+        allow read: if isFamilyMember(familyId);
+        allow create: if isFamilyMember(familyId) && request.resource.data.authorUid == request.auth.uid;
+        // 좋아요 토글만 허용 - 그 외 필드는 게시 이후 수정 불가
+        allow update: if isFamilyMember(familyId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likedBy']);
+        allow delete: if isFamilyMember(familyId) && resource.data.authorUid == request.auth.uid;
+
+        match /comments/{commentId} {
+          allow read: if isFamilyMember(familyId);
+          allow create: if isFamilyMember(familyId) && request.resource.data.authorUid == request.auth.uid;
+          allow update, delete: if false;
+        }
       }
     }
 
