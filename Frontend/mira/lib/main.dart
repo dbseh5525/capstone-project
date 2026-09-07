@@ -49,6 +49,18 @@ const ink = Color(0xFF263E34),
     violet = Color(0xFF315E50),
     cream = Color(0xFFF7F8F3);
 
+/// FirebaseAuth.instance는 Firebase가 초기화되지 않은 환경(화면 미리보기, 테스트,
+/// 아직 등록 안 된 플랫폼)에서 접근하는 순간 예외를 던진다. build() 안에서 로그인
+/// 여부만 필요한 곳은 항상 이걸로 안전하게 확인한다 — 그냥 currentUser를 읽으면
+/// IndexedStack에 항상 붙어있는 다른 탭까지 통째로 에러 화면이 된다.
+String? currentUidOrNull() {
+  try {
+    return FirebaseAuth.instance.currentUser?.uid;
+  } catch (_) {
+    return null;
+  }
+}
+
 class MiraApp extends StatelessWidget {
   const MiraApp({this.home, super.key});
   final Widget? home;
@@ -816,7 +828,9 @@ class _PetSetupState extends State<PetSetup> {
   }
 
   Future<void> _loadExisting() async {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    // initState에서 바로 호출돼서, Firebase 미설정 환경에서는 currentUidOrNull()로
+    // 안전하게 확인해야 한다 (안 그러면 화면 진입 자체가 예외로 죽는다).
+    final uid = currentUidOrNull();
     if (uid == null) {
       if (mounted) setState(() => _loadingExisting = false);
       return;
@@ -1305,7 +1319,7 @@ class _FamilyCareSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final myUid = FirebaseAuth.instance.currentUser?.uid;
+    final myUid = currentUidOrNull();
     if (myUid == null) {
       return const Text('로그인이 필요해요.', style: TextStyle(color: Colors.black54));
     }
@@ -1460,16 +1474,9 @@ class _MoodAlertListener extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // IndexedStack 밖(항상 그려지는 자리)에 있는 위젯이라, Firebase 미설정 플랫폼에서
-    // FirebaseAuth.instance가 던지는 예외를 여기서 막지 않으면 에러 박스가 모든 탭 위에
-    // 덮어씌워진다. main()의 Firebase.initializeApp try/catch와 같은 이유.
-    String? maybeUid;
-    try {
-      maybeUid = FirebaseAuth.instance.currentUser?.uid;
-    } catch (_) {
-      return const SizedBox.shrink();
-    }
-    final uid = maybeUid;
+    // IndexedStack 밖(항상 그려지는 자리)에 있는 위젯이라 currentUidOrNull()로
+    // 안전하게 확인한다 — 그냥 읽으면 에러 박스가 모든 탭 위에 덮어씌워진다.
+    final uid = currentUidOrNull();
     if (uid == null) return const SizedBox.shrink();
     return StreamBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
       stream: NotificationService.instance.watchUnread(uid),
@@ -1663,7 +1670,7 @@ class _DailyQuestsSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final myUid = FirebaseAuth.instance.currentUser?.uid;
+    final myUid = currentUidOrNull();
     if (myUid == null) {
       return const Text('로그인이 필요해요.', style: TextStyle(color: Colors.black54));
     }
@@ -1778,7 +1785,7 @@ class _CareCompletingDogRoom extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final myUid = FirebaseAuth.instance.currentUser?.uid;
+    final myUid = currentUidOrNull();
     return DogRoomScreen(
       controller: controller,
       onCareAction: myUid == null
@@ -2035,7 +2042,7 @@ class _MomentsSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = currentUidOrNull();
     if (uid == null) {
       return const Text('로그인 후 가족 이야기를 볼 수 있어요.', style: TextStyle(color: Colors.black54));
     }
@@ -2115,7 +2122,7 @@ class _FamilyMembersSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = currentUidOrNull();
     if (uid == null) {
       return const Text('로그인 후 가족 구성원을 볼 수 있어요.', style: TextStyle(color: Colors.black54));
     }
@@ -2821,7 +2828,7 @@ class HelpScreen extends StatelessWidget {
 class _ProfileCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = currentUidOrNull();
     if (uid == null) {
       return const Card(
         child: ListTile(
