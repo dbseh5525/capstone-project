@@ -1,0 +1,147 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isFamilyMember(familyId) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/families/$(familyId)) &&
+        request.auth.uid in get(/databases/$(database)/documents/families/$(familyId)).data.members;
+    }
+
+    function familyRoles() {
+      return ['아빠', '엄마', '아들', '딸'];
+    }
+
+    match /users/{userId} {
+      // 이름/역할/사진은 가족 구성원끼리 공유 전제라 signedIn이면 read 허용.
+      // 생일 등 더 민감한 필드가 늘어나면 public/private 문서 분리 고려.
+      allow read: if signedIn();
+      allow write: if signedIn() && request.auth.uid == userId;
+
+      match /settings/{settingsId} {
+        allow read, write: if signedIn() && request.auth.uid == userId;
+      }
+
+      match /notifications/{notificationId} {
+        allow read, update: if signedIn() && request.auth.uid == userId;
+        allow delete: if false;
+        // moodAlert만 예외적으로 클라이언트에서 직접 생성 허용 (createFamily/joinFamily와 같은 이유로
+        // Cloud Functions 배포 전까지 임시 조치 — Blaze 요금제 전환 시 Cloud Function으로 옮길 것).
+        // 같은 가족 구성원에게만, 정해진 필드로만, 안 읽음 상태로만 보낼 수 있게 제한한다.
+        allow create: if signedIn() &&
+          request.auth.uid != userId &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.familyId ==
+            get(/databases/$(database)/documents/users/$(userId)).data.familyId &&
+          request.resource.data.keys().hasOnly(['type', 'title', 'message', 'isRead', 'relatedId', 'createdAt']) &&
+          request.resource.data.type == 'moodAlert' &&
+          request.resource.data.isRead == false;
+      }
+    }
+
+    match /families/{familyId} {
+      // 초대 코드 확인/가입 흐름 때문에 문서 id(코드)를 아는 사람이면 단건 조회는 허용.
+      // list/query는 막혀있어서 코드를 모르면 가족을 검색해서 찾을 수는 없음.
+      allow get: if signedIn();
+      allow list: if false;
+      allow delete: if false;
+
+      // 가족 생성: 본인 uid 하나만 members에 담아 새 문서를 만드는 경우만 허용
+      allow create: if signedIn() &&
+        request.resource.data.keys().hasOnly(['members', 'createdAt']) &&
+        request.resource.data.members.keys().hasOnly([request.auth.uid]) &&
+        request.resource.data.members[request.auth.uid] in familyRoles();
+
+      // 가족 참여: 기존 멤버 정보는 그대로 두고 본인 uid만 새로 추가하는 경우만 허용
+      allow update: if signedIn() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members']) &&
+        request.resource.data.members.diff(resource.data.members).removedKeys().size() == 0 &&
+        request.resource.data.members.diff(resource.data.members).changedKeys().size() == 0 &&
+        request.resource.data.members.diff(resource.data.members).addedKeys().hasOnly([request.auth.uid]) &&
+        request.resource.data.members.size() <= familyRoles().size() &&
+        request.resource.data.members[request.auth.uid] in familyRoles() &&
+        !(request.resource.data.members[request.auth.uid] in resource.data.members.values());
+
+      match /events/{eventId} {
+        allow read, create, update, delete: if isFamilyMember(familyId);
+      }
+
+      match /moods/{moodId} {
+        allow read: if isFamilyMember(familyId);
+        allow create: if isFamilyMember(familyId) && request.resource.data.userId == request.auth.uid;
+        allow update, delete: if false;
+      }
+
+      match /dailyQuestions/{questionId} {
+        allow read: if isFamilyMember(familyId);
+        allow write: if false; // 스케줄 Cloud Function에서만 생성
+
+        match /answers/{answerUserId} {
+          allow read: if isFamilyMember(familyId);
+          allow create, update: if isFamilyMember(familyId) && request.auth.uid == answerUserId;
+          allow delete: if false;
+        }
+      }
+
+      match /garden/{gardenDocId} {
+        allow read: if isFamilyMember(familyId);
+        allow write: if false; // Cloud Functions 트랜잭션에서만 갱신
+      }
+
+      match /pet/{petDocId} {
+        // 반려동물은 가족 공유 - 누구든 만들고 수정할 수 있음(한 명이 설정하면 가족 전체에 반영)
+        allow read: if isFamilyMember(familyId);
+        allow create, update: if isFamilyMember(familyId);
+        allow delete: if false;
+      }
+
+      match /dailyCare/{dateId} {
+        // 문서는 uid를 키로 하는 맵 - 본인 uid 항목만 쓰거나 바꿀 수 있음
+        allow read: if isFamilyMember(familyId);
+        allow create: if isFamilyMember(familyId) &&
+          request.resource.data.keys().hasOnly([request.auth.uid]);
+        allow update: if isFamilyMember(familyId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([request.auth.uid]);
+        allow delete: if false;
+      }
+
+      match /moments/{momentId} {
+        allow read: if isFamilyMember(familyId);
+        allow create: if isFamilyMember(familyId) && request.resource.data.authorUid == request.auth.uid;
+        // 좋아요 토글만 허용 - 그 외 필드는 생성 이후 수정 불가
+        allow update: if isFamilyMember(familyId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likedBy']);
+        allow delete: if false;
+
+        match /comments/{commentId} {
+          allow read: if isFamilyMember(familyId);
+          allow create: if isFamilyMember(familyId) && request.resource.data.authorUid == request.auth.uid;
+          allow update, delete: if false;
+        }
+      }
+
+      match /photos/{photoId} {
+        allow read: if isFamilyMember(familyId);
+        allow create: if isFamilyMember(familyId) && request.resource.data.authorUid == request.auth.uid;
+        // 좋아요 토글만 허용 - 그 외 필드는 게시 이후 수정 불가
+        allow update: if isFamilyMember(familyId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likedBy']);
+        allow delete: if isFamilyMember(familyId) && resource.data.authorUid == request.auth.uid;
+
+        match /comments/{commentId} {
+          allow read: if isFamilyMember(familyId);
+          allow create: if isFamilyMember(familyId) && request.resource.data.authorUid == request.auth.uid;
+          allow update, delete: if false;
+        }
+      }
+    }
+
+    match /holidays/{date} {
+      allow read: if true;
+      allow write: if false;
+    }
+  }
+}

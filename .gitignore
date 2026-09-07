@@ -31,6 +31,11 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# ...but Flutter's Windows runner needs its own manifest committed, or
+# `flutter run -d windows` fails at the CMake step with "Cannot find source
+# file: runner.exe.manifest" (found the hard way — mira's copy was never
+# tracked because of the *.manifest rule above; dog_room's copy predates it).
+!Frontend/*/windows/runner/runner.exe.manifest
 
 # Installer logs
 pip-log.txt
@@ -205,3 +210,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# macOS
+.DS_Store
+
+# mira 화면 검토용 골든 스크린샷 (CAPTURE_UI=true 테스트 산출물) - 로컬 전용, 커밋 대상 아님
+/.mira-work/

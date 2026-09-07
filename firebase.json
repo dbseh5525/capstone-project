@@ -1,0 +1,23 @@
+{
+  "hosting": {
+    "public": "Frontend/familyapp/build/web",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
+  "functions": {
+    "source": "Backend/functions"
+  },
+  "firestore": {
+    "rules": "Backend/firestore.rules",
+    "indexes": "Backend/firestore.indexes.json"
+  }
+}

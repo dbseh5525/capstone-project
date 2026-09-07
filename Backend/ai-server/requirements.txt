@@ -1,0 +1,12 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+google-genai>=1.0
+python-dotenv>=1.0
+python-multipart>=0.0.12
+torch>=2.5
+transformers>=4.46
+
+# dev/test only
+pytest>=8.3
+httpx>=0.27
