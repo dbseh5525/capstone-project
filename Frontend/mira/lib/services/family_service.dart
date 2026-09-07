@@ -28,7 +28,10 @@ class FamilyService {
         .collection('users')
         .where('familyId', isEqualTo: familyId)
         .snapshots()
-        .map((snapshot) => snapshot.docs.map((doc) => doc.data()).toList());
+        .map(
+          (snapshot) =>
+              snapshot.docs.map((doc) => {...doc.data(), 'uid': doc.id}).toList(),
+        );
   }
 
   String _generateCode() {

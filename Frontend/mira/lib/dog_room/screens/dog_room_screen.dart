@@ -11,8 +11,9 @@ import '../widgets/feeding_dog.dart';
 import '../widgets/tail_wagging_dog.dart';
 
 class DogRoomScreen extends StatefulWidget {
-  const DogRoomScreen({super.key, required this.controller});
+  const DogRoomScreen({super.key, required this.controller, this.onCareAction});
   final DogController controller;
+  final ValueChanged<CareAction>? onCareAction;
 
   @override
   State<DogRoomScreen> createState() => _DogRoomScreenState();
@@ -260,6 +261,7 @@ class _DogRoomScreenState extends State<DogRoomScreen>
       return;
     }
 
+    widget.onCareAction?.call(action);
     _moveTimer?.cancel();
     setState(() {
       _isCareTransition = false;

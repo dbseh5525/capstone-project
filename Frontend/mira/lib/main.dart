@@ -1,10 +1,11 @@
-import 'dart:typed_data';
+import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'design/mira_icons.dart';
@@ -19,9 +20,15 @@ import 'privacy/privacy_screen.dart';
 import 'services/ai_server_service.dart';
 import 'services/auth_service.dart';
 import 'services/character_server_service.dart';
+import 'services/daily_care_service.dart';
 import 'services/family_service.dart';
 import 'services/moment_service.dart';
 import 'services/notification_service.dart';
+import 'services/pet_service.dart';
+import 'widgets/author_avatar.dart';
+
+const textScaleKey = 'text_scale_v1';
+final textScaleNotifier = ValueNotifier<double>(1.0);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,6 +36,12 @@ Future<void> main() async {
     await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   } catch (_) {
     // Web/Android는 아직 Firebase 앱 등록 전이라 화면 미리보기용으로 무시.
+  }
+  try {
+    final savedScale = await SharedPreferencesAsync().getDouble(textScaleKey);
+    if (savedScale != null) textScaleNotifier.value = savedScale;
+  } catch (_) {
+    /* 기본 배율(1.0) 유지 */
   }
   runApp(const MiraApp());
 }
@@ -120,12 +133,18 @@ class MiraApp extends StatelessWidget {
         contentPadding: const EdgeInsets.all(17),
       ),
     ),
-    builder: (context, child) => ColoredBox(
-      color: const Color(0xFFE9EEE7),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 480),
-          child: ClipRect(child: child!),
+    builder: (context, child) => ValueListenableBuilder<double>(
+      valueListenable: textScaleNotifier,
+      builder: (context, scale, _) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(scale)),
+        child: ColoredBox(
+          color: const Color(0xFFE9EEE7),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480),
+              child: ClipRect(child: child!),
+            ),
+          ),
         ),
       ),
     ),
@@ -136,13 +155,24 @@ class MiraApp extends StatelessWidget {
 enum Stage { onboarding, privacy, auth, profile, pet, app }
 
 class AppFlow extends StatefulWidget {
-  const AppFlow({super.key});
+  const AppFlow({this.skipOnboarding = false, super.key});
+  final bool skipOnboarding;
   @override
   State<AppFlow> createState() => _AppFlowState();
 }
 
 class _AppFlowState extends State<AppFlow> {
   Stage stage = Stage.onboarding;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.skipOnboarding) {
+      stage = Stage.auth;
+      _start();
+    }
+  }
+
   Future<void> _start() async {
     String? record;
     try {
@@ -609,29 +639,48 @@ class _ProfileSetupState extends State<ProfileSetup> {
     }
   }
 
-  Future<void> _handleSubmit() async {
+  Future<void> _saveProfileFields() async {
+    final name = _nameController.text.trim();
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid != null && (name.isNotEmpty || _birthday != null)) {
+      await FirebaseFirestore.instance.collection('users').doc(uid).set({
+        if (name.isNotEmpty) 'name': name,
+        if (_birthday != null)
+          'birthday':
+              '${_birthday!.year}-${_birthday!.month.toString().padLeft(2, '0')}-${_birthday!.day.toString().padLeft(2, '0')}',
+      }, SetOptions(merge: true));
+    }
+  }
+
+  Future<void> _handleCreate() async {
     setState(() {
       _submitting = true;
       _errorText = null;
     });
     try {
-      final name = _nameController.text.trim();
-      final uid = FirebaseAuth.instance.currentUser?.uid;
-      if (uid != null && (name.isNotEmpty || _birthday != null)) {
-        await FirebaseFirestore.instance.collection('users').doc(uid).set({
-          if (name.isNotEmpty) 'name': name,
-          if (_birthday != null)
-            'birthday':
-                '${_birthday!.year}-${_birthday!.month.toString().padLeft(2, '0')}-${_birthday!.day.toString().padLeft(2, '0')}',
-        }, SetOptions(merge: true));
-      }
+      await _saveProfileFields();
+      await FamilyService.instance.createFamily(role);
+      widget.onDone();
+    } on FamilyServiceException catch (e) {
+      setState(() => _errorText = e.message);
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
 
-      final inviteCode = _inviteCodeController.text.trim();
-      if (inviteCode.isEmpty) {
-        await FamilyService.instance.createFamily(role);
-      } else {
-        await FamilyService.instance.joinFamily(inviteCode, role);
-      }
+  Future<void> _handleJoin() async {
+    final inviteCode = _inviteCodeController.text.trim();
+    if (inviteCode.isEmpty) {
+      setState(() => _errorText = '초대 코드를 입력해주세요.');
+      return;
+    }
+    setState(() {
+      _submitting = true;
+      _errorText = null;
+    });
+    try {
+      await _saveProfileFields();
+      await FamilyService.instance.joinFamily(inviteCode, role);
       widget.onDone();
     } on FamilyServiceException catch (e) {
       setState(() => _errorText = e.message);
@@ -678,24 +727,17 @@ class _ProfileSetupState extends State<ProfileSetup> {
             suffixIcon: Icon(CupertinoIcons.calendar),
           ),
         ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _inviteCodeController,
-          textCapitalization: TextCapitalization.characters,
-          decoration: const InputDecoration(
-            labelText: '가족 초대 코드',
-            hintText: '처음 만드는 가족이면 비워두세요',
-          ),
-        ),
         if (_errorText != null) ...[
           const SizedBox(height: 12),
           Text(_errorText!, style: const TextStyle(color: Colors.red)),
         ],
         const SizedBox(height: 28),
+        const Text('처음이신가요?', style: TextStyle(fontWeight: FontWeight.w700)),
+        const SizedBox(height: 10),
         SizedBox(
           width: double.infinity,
           child: FilledButton(
-            onPressed: _submitting ? null : _handleSubmit,
+            onPressed: _submitting ? null : _handleCreate,
             style: FilledButton.styleFrom(padding: const EdgeInsets.all(18)),
             child: _submitting
                 ? const SizedBox(
@@ -703,7 +745,29 @@ class _ProfileSetupState extends State<ProfileSetup> {
                     height: 20,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Text('반려견 설정으로'),
+                : const Text('가족 코드 생성하기'),
+          ),
+        ),
+        const SizedBox(height: 24),
+        const Divider(),
+        const SizedBox(height: 16),
+        const Text('이미 가족 코드가 있으신가요?', style: TextStyle(fontWeight: FontWeight.w700)),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _inviteCodeController,
+          textCapitalization: TextCapitalization.characters,
+          decoration: const InputDecoration(
+            labelText: '가족 초대 코드',
+            hintText: '가족에게 받은 코드를 입력하세요',
+          ),
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton(
+            onPressed: _submitting ? null : _handleJoin,
+            style: OutlinedButton.styleFrom(padding: const EdgeInsets.all(18)),
+            child: const Text('가족 코드 등록하기'),
           ),
         ),
         const SizedBox(height: 8),
@@ -730,19 +794,55 @@ class _PetSetupState extends State<PetSetup> {
   String personality = '활발함';
   final _breedController = TextEditingController();
   final _colorController = TextEditingController();
+  final _nameController = TextEditingController();
   final _picker = ImagePicker();
   final List<Uint8List> _photoBytes = [];
   bool _analyzing = false;
+  bool _saving = false;
+  bool _loadingExisting = true;
+  bool _hadExistingPet = false;
   String? _analysisError;
   Uint8List? _characterImage;
   bool _generatingCharacter = false;
   String? _characterError;
   int _characterSeed = 42;
+  String? _saveError;
+  String? _familyId;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadExisting();
+  }
+
+  Future<void> _loadExisting() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      if (mounted) setState(() => _loadingExisting = false);
+      return;
+    }
+    final familyId = await FamilyService.instance.fetchMyFamilyId(uid);
+    final pet = familyId == null ? null : await PetService.instance.fetchPet(familyId);
+    if (!mounted) return;
+    setState(() {
+      _familyId = familyId;
+      _loadingExisting = false;
+      if (pet != null) {
+        _hadExistingPet = true;
+        photo = false;
+        _nameController.text = pet['name'] as String? ?? '';
+        _breedController.text = pet['breed'] as String? ?? '';
+        _colorController.text = pet['colorDescription'] as String? ?? '';
+        personality = pet['personality'] as String? ?? personality;
+      }
+    });
+  }
 
   @override
   void dispose() {
     _breedController.dispose();
     _colorController.dispose();
+    _nameController.dispose();
     super.dispose();
   }
 
@@ -772,6 +872,37 @@ class _PetSetupState extends State<PetSetup> {
       setState(() => _characterError = '캐릭터를 만들지 못했어요. 잠시 후 다시 시도해주세요.');
     } finally {
       if (mounted) setState(() => _generatingCharacter = false);
+    }
+  }
+
+  Future<void> _handleSubmit() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null || _familyId == null) {
+      widget.onDone();
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _saveError = null;
+    });
+    try {
+      await PetService.instance.savePet(
+        familyId: _familyId!,
+        updatedByUid: uid,
+        name: _nameController.text.trim(),
+        breed: _breedController.text.trim(),
+        colorDescription: _colorController.text.trim(),
+        personality: personality,
+      );
+      final image = _characterImage;
+      if (image != null) {
+        await CharacterSaveService.instance.save(image);
+      }
+      widget.onDone();
+    } catch (_) {
+      setState(() => _saveError = '저장하지 못했어요. 다시 시도해주세요.');
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
@@ -1002,22 +1133,27 @@ class _PetSetupState extends State<PetSetup> {
           ),
         ),
         const SizedBox(height: 18),
-        const TextField(
-          decoration: InputDecoration(labelText: '이름', hintText: '보리'),
+        TextField(
+          controller: _nameController,
+          decoration: const InputDecoration(labelText: '이름', hintText: '보리'),
         ),
+        if (_saveError != null) ...[
+          const SizedBox(height: 12),
+          Text(_saveError!, style: const TextStyle(color: Colors.red)),
+        ],
         const SizedBox(height: 26),
         SizedBox(
           width: double.infinity,
           child: FilledButton(
-            onPressed: () async {
-              final image = _characterImage;
-              if (image != null) {
-                await CharacterSaveService.instance.save(image);
-              }
-              widget.onDone();
-            },
+            onPressed: (_saving || _loadingExisting) ? null : _handleSubmit,
             style: FilledButton.styleFrom(padding: const EdgeInsets.all(18)),
-            child: const Text('MIRA 시작하기'),
+            child: _saving
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Text(_hadExistingPet ? '저장하기' : 'MIRA 시작하기'),
           ),
         ),
       ],
@@ -1066,7 +1202,7 @@ class _MainShellState extends State<MainShell> {
     try {
       final prefs = SharedPreferencesAsync();
       await dog.flush();
-      for (final key in [MemoryStore.storageKey, 'dog_state_v1', privacyKey]) {
+      for (final key in ['dog_state_v1', privacyKey]) {
         await prefs.remove(key);
       }
       if (mounted) {
@@ -1096,7 +1232,7 @@ class _MainShellState extends State<MainShell> {
       ),
       index == 1 ? PetPage(controller: dog) : const SizedBox.shrink(),
       const FamilyPage(),
-      const MemoryPage(),
+      MemoryPage(active: index == 3),
       const AiPage(),
       SettingsPage(onClearData: _clearData),
     ];
@@ -1136,23 +1272,151 @@ class _MainShellState extends State<MainShell> {
   void _attendance() => showDialog(
     context: context,
     builder: (c) => AlertDialog(
-      title: const Text('오늘의 돌봄을 정할게요'),
-      content: const Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          CareLine('👩 엄마', '🍪 간식 주기'),
-          CareLine('👨 아빠', '🎾 공놀이'),
-          CareLine('👧 나', '🦮 산책하기'),
-        ],
-      ),
+      title: const Text('오늘의 돌봄 현황'),
+      content: const SizedBox(width: 320, child: _FamilyCareSection()),
       actions: [
-        FilledButton(
-          onPressed: () => Navigator.pop(c),
-          child: const Text('출석하고 시작하기'),
-        ),
+        FilledButton(onPressed: () => Navigator.pop(c), child: const Text('닫기')),
       ],
     ),
   );
+}
+
+class _FamilyCareSection extends StatelessWidget {
+  const _FamilyCareSection();
+
+  Future<void> _pickAction(BuildContext context, String familyId, String uid) async {
+    final action = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('오늘 무엇을 할까요?'),
+        children: [
+          for (final action in careActions)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, action),
+              child: Text(action),
+            ),
+        ],
+      ),
+    );
+    if (action != null) {
+      await DailyCareService.instance.selectAction(familyId: familyId, uid: uid, action: action);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final myUid = FirebaseAuth.instance.currentUser?.uid;
+    if (myUid == null) {
+      return const Text('로그인이 필요해요.', style: TextStyle(color: Colors.black54));
+    }
+    return FutureBuilder<String?>(
+      future: FamilyService.instance.fetchMyFamilyId(myUid),
+      builder: (context, familyIdSnapshot) {
+        final familyId = familyIdSnapshot.data;
+        if (familyIdSnapshot.connectionState == ConnectionState.waiting) {
+          return const SizedBox(
+            height: 60,
+            child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+          );
+        }
+        if (familyId == null) {
+          return const Text('아직 가족에 소속되어 있지 않아요.', style: TextStyle(color: Colors.black54));
+        }
+        return StreamBuilder<List<Map<String, dynamic>>>(
+          stream: FamilyService.instance.watchFamilyMembers(familyId),
+          builder: (context, memberSnapshot) {
+            final members = memberSnapshot.data ?? const [];
+            return StreamBuilder<Map<String, dynamic>>(
+              stream: DailyCareService.instance.watchToday(familyId),
+              builder: (context, careSnapshot) {
+                final care = careSnapshot.data ?? const {};
+                if (members.isEmpty) {
+                  return const Text('가족 구성원이 없어요.', style: TextStyle(color: Colors.black54));
+                }
+                final doneCount = members.where((m) {
+                  final record = care[m['uid']] as Map<String, dynamic>?;
+                  return record?['completedAt'] != null;
+                }).length;
+                return Card(
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+                        child: Row(
+                          children: [
+                            const Text(
+                              '오늘 현황',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12,
+                                color: Colors.black54,
+                              ),
+                            ),
+                            const Spacer(),
+                            Text(
+                              '$doneCount / ${members.length} 완료',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: violet,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      for (final member in members)
+                        Builder(
+                          builder: (context) {
+                            final uid = member['uid'] as String;
+                            final name = member['name'] as String? ?? '이름 없음';
+                            final role = member['role'] as String?;
+                            final record = care[uid] as Map<String, dynamic>?;
+                            final avatar = _roleEmoji[role] ?? '👤';
+                            final isDone = record?['completedAt'] != null;
+                            if (isDone) {
+                              return CareLine('$avatar $name', '${record!['action']} · 완료');
+                            }
+                            if (uid == myUid) {
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 4,
+                                  horizontal: 16,
+                                ),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        record != null
+                                            ? '$avatar $name · ${record['action']} 하면 완료돼요'
+                                            : '$avatar $name',
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(fontWeight: FontWeight.w700),
+                                      ),
+                                    ),
+                                    TextButton(
+                                      onPressed: () => _pickAction(context, familyId, uid),
+                                      child: Text(record != null ? '변경하기' : '선택하기'),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            }
+                            return CareLine(
+                              '$avatar $name',
+                              record != null ? '${record['action']} · 진행 중' : '대기',
+                            );
+                          },
+                        ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
 }
 
 class AppPage extends StatelessWidget {
@@ -1333,7 +1597,7 @@ class HomePage extends StatelessWidget {
           child: SizedBox(
             height: 590,
             child: active
-                ? DogRoomScreen(controller: dog)
+                ? _CareCompletingDogRoom(controller: dog)
                 : const SizedBox.shrink(),
           ),
         ),
@@ -1375,25 +1639,11 @@ class HomePage extends StatelessWidget {
           color: Color(0xFFDDECE3),
         ),
         const SizedBox(height: 28),
-        const Section('나의 일일 퀘스트', '2 / 3 완료'),
-        const SizedBox(height: 12),
-        const DailyQuest(icon: '🦮', title: '보리와 15분 산책', done: true),
-        const SizedBox(height: 8),
-        DailyQuest(icon: '✍️', title: '오늘의 감정 한 줄 기록', done: false, onTap: onMoodDiary),
-        const SizedBox(height: 8),
-        const DailyQuest(icon: '💬', title: '가족 일기에 반응 남기기', done: false),
+        _DailyQuestsSection(onMoodDiary: onMoodDiary),
         const SizedBox(height: 28),
-        const Section('오늘의 가족 돌봄', '2 / 3 완료'),
+        const Section('오늘의 가족 돌봄', ''),
         const SizedBox(height: 12),
-        const Card(
-          child: Column(
-            children: [
-              CareLine('👩 엄마', '🍪 간식 · 완료'),
-              CareLine('👧 나', '🦮 산책 · 완료'),
-              CareLine('👨 아빠', '🎾 공놀이 · 대기'),
-            ],
-          ),
-        ),
+        const _FamilyCareSection(),
         const SizedBox(height: 20),
         const Row(
           children: [
@@ -1407,6 +1657,84 @@ class HomePage extends StatelessWidget {
   );
 }
 
+class _DailyQuestsSection extends StatelessWidget {
+  const _DailyQuestsSection({required this.onMoodDiary});
+  final VoidCallback onMoodDiary;
+
+  @override
+  Widget build(BuildContext context) {
+    final myUid = FirebaseAuth.instance.currentUser?.uid;
+    if (myUid == null) {
+      return const Text('로그인이 필요해요.', style: TextStyle(color: Colors.black54));
+    }
+    return FutureBuilder<String?>(
+      future: FamilyService.instance.fetchMyFamilyId(myUid),
+      builder: (context, familyIdSnapshot) {
+        final familyId = familyIdSnapshot.data;
+        if (familyId == null) {
+          return const Text('아직 가족에 소속되어 있지 않아요.', style: TextStyle(color: Colors.black54));
+        }
+        return StreamBuilder<Map<String, dynamic>>(
+          stream: DailyCareService.instance.watchToday(familyId),
+          builder: (context, careSnapshot) {
+            final myCareRecord =
+                (careSnapshot.data ?? const {})[myUid] as Map<String, dynamic>?;
+            final cared = myCareRecord?['completedAt'] != null;
+            return StreamBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+              stream: MomentService.instance.watchMoments(familyId),
+              builder: (context, momentSnapshot) {
+                final docs = momentSnapshot.data ?? const [];
+                final now = DateTime.now();
+                final postedToday = docs.any((doc) {
+                  final data = doc.data();
+                  if (data['authorUid'] != myUid) return false;
+                  final createdAt = (data['createdAt'] as Timestamp?)?.toDate();
+                  return createdAt != null &&
+                      createdAt.year == now.year &&
+                      createdAt.month == now.month &&
+                      createdAt.day == now.day;
+                });
+                final reacted = docs.any((doc) {
+                  final data = doc.data();
+                  final likedBy = List<String>.from(data['likedBy'] as List? ?? const []);
+                  return data['authorUid'] != myUid && likedBy.contains(myUid);
+                });
+                final quests = [
+                  (icon: '🐾', title: '오늘의 강아지 돌봄', done: cared, onTap: null),
+                  (
+                    icon: '✍️',
+                    title: '오늘의 감정 한 줄 기록',
+                    done: postedToday,
+                    onTap: onMoodDiary,
+                  ),
+                  (icon: '💬', title: '가족 일기에 반응 남기기', done: reacted, onTap: null),
+                ];
+                final doneCount = quests.where((q) => q.done).length;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Section('나의 일일 퀘스트', '$doneCount / ${quests.length} 완료'),
+                    const SizedBox(height: 12),
+                    for (final quest in quests) ...[
+                      DailyQuest(
+                        icon: quest.icon,
+                        title: quest.title,
+                        done: quest.done,
+                        onTap: quest.onTap,
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ],
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
 class PetPage extends StatelessWidget {
   const PetPage({required this.controller, super.key});
   final DogController controller;
@@ -1416,12 +1744,12 @@ class PetPage extends StatelessWidget {
       final minimumHeight =
           600.0 + (MediaQuery.textScalerOf(context).scale(14) - 14) * 5;
       if (constraints.maxHeight >= minimumHeight) {
-        return DogRoomScreen(controller: controller);
+        return _CareCompletingDogRoom(controller: controller);
       }
       return SingleChildScrollView(
         child: SizedBox(
           height: minimumHeight,
-          child: DogRoomScreen(controller: controller),
+          child: _CareCompletingDogRoom(controller: controller),
         ),
       );
     },
@@ -1435,6 +1763,40 @@ class FamilyPage extends StatefulWidget {
 }
 
 const _roleEmoji = {'아빠': '👨', '엄마': '👩', '아들': '👦', '딸': '👧'};
+
+const _careActionLabels = {
+  CareAction.feed: '🍚 밥 주기',
+  CareAction.wash: '🛁 목욕',
+  CareAction.play: '🎾 놀기',
+  CareAction.sleep: '😴 재우기',
+};
+
+// 강아지 게임에서 실제로 그 행동을 해야 오늘의 돌봄이 완료로 바뀌도록 연결.
+class _CareCompletingDogRoom extends StatelessWidget {
+  const _CareCompletingDogRoom({required this.controller});
+  final DogController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final myUid = FirebaseAuth.instance.currentUser?.uid;
+    return DogRoomScreen(
+      controller: controller,
+      onCareAction: myUid == null
+          ? null
+          : (action) async {
+              final label = _careActionLabels[action];
+              if (label == null) return;
+              final familyId = await FamilyService.instance.fetchMyFamilyId(myUid);
+              if (familyId == null) return;
+              await DailyCareService.instance.completeSelectedAction(
+                familyId: familyId,
+                uid: myUid,
+                action: label,
+              );
+            },
+    );
+  }
+}
 
 class _FamilyPageState extends State<FamilyPage> {
   @override
@@ -1558,6 +1920,116 @@ class _FamilyPageState extends State<FamilyPage> {
   }
 }
 
+Future<void> _showCommentsSheet({
+  required BuildContext context,
+  required String familyId,
+  required String momentId,
+  required List<QueryDocumentSnapshot<Map<String, dynamic>>> comments,
+}) async {
+  final uid = FirebaseAuth.instance.currentUser?.uid;
+  final controller = TextEditingController();
+  await showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (sheetContext) => Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(sheetContext).bottom),
+      child: SizedBox(
+        height: MediaQuery.sizeOf(sheetContext).height * 0.7,
+        child: Column(
+          children: [
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text('댓글', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18)),
+            ),
+            Expanded(
+              child: StreamBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+                stream: MomentService.instance.watchComments(familyId, momentId),
+                initialData: comments,
+                builder: (context, snapshot) {
+                  final docs = snapshot.data ?? const [];
+                  if (docs.isEmpty) {
+                    return const Center(
+                      child: Text('아직 댓글이 없어요.', style: TextStyle(color: Colors.black54)),
+                    );
+                  }
+                  return ListView(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    children: [
+                      for (final doc in docs)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 14),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              AuthorAvatar(
+                                uid: doc.data()['authorUid'] as String?,
+                                role: doc.data()['authorRole'] as String?,
+                                radius: 16,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      doc.data()['authorName'] as String? ?? '이름 없음',
+                                      style: const TextStyle(fontWeight: FontWeight.w700),
+                                    ),
+                                    Text(doc.data()['text'] as String? ?? ''),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              ),
+            ),
+            if (uid != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: controller,
+                        decoration: const InputDecoration(hintText: '댓글을 입력하세요'),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(CupertinoIcons.paperplane_fill),
+                      onPressed: () async {
+                        final text = controller.text.trim();
+                        if (text.isEmpty) return;
+                        final profile = await FirebaseFirestore.instance
+                            .collection('users')
+                            .doc(uid)
+                            .get();
+                        await MomentService.instance.addComment(
+                          familyId: familyId,
+                          momentId: momentId,
+                          authorUid: uid,
+                          authorName: profile.data()?['name'] as String? ?? '이름 없음',
+                          authorRole: profile.data()?['role'] as String? ?? '',
+                          text: text,
+                        );
+                        controller.clear();
+                      },
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    ),
+  );
+  controller.dispose();
+}
+
 class _MomentsSection extends StatelessWidget {
   const _MomentsSection();
 
@@ -1597,20 +2069,33 @@ class _MomentsSection extends StatelessWidget {
                         data['likedBy'] as List? ?? const [],
                       );
                       final isLiked = likedBy.contains(uid);
-                      return DiaryCard(
-                        name: data['authorName'] as String? ?? '이름 없음',
-                        mood: data['mood'] as String? ?? '',
-                        body: data['body'] as String? ?? '',
-                        avatar: _roleEmoji[data['authorRole']] ?? '👤',
-                        likes: likedBy.length,
-                        comments: data['commentCount'] as int? ?? 0,
-                        isLiked: isLiked,
-                        onLike: () => MomentService.instance.toggleLike(
-                          familyId: familyId,
-                          momentId: doc.id,
-                          uid: uid,
-                          currentlyLiked: isLiked,
-                        ),
+                      return StreamBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+                        stream: MomentService.instance.watchComments(familyId, doc.id),
+                        builder: (context, commentSnapshot) {
+                          final commentDocs = commentSnapshot.data ?? const [];
+                          return DiaryCard(
+                            name: data['authorName'] as String? ?? '이름 없음',
+                            mood: data['mood'] as String? ?? '',
+                            body: data['body'] as String? ?? '',
+                            authorUid: data['authorUid'] as String?,
+                            authorRole: data['authorRole'] as String?,
+                            likes: likedBy.length,
+                            comments: commentDocs.length,
+                            isLiked: isLiked,
+                            onLike: () => MomentService.instance.toggleLike(
+                              familyId: familyId,
+                              momentId: doc.id,
+                              uid: uid,
+                              currentlyLiked: isLiked,
+                            ),
+                            onComment: () => _showCommentsSheet(
+                              context: context,
+                              familyId: familyId,
+                              momentId: doc.id,
+                              comments: commentDocs,
+                            ),
+                          );
+                        },
                       );
                     },
                   ),
@@ -1654,14 +2139,17 @@ class _FamilyMembersSection extends StatelessWidget {
             if (members.isEmpty) {
               return const Text('아직 참여한 가족 구성원이 없어요.', style: TextStyle(color: Colors.black54));
             }
-            const emoji = _roleEmoji;
             return Wrap(
               spacing: 10,
               runSpacing: 10,
               children: [
                 for (final member in members)
                   Chip(
-                    avatar: Text(emoji[member['role']] ?? '👤'),
+                    avatar: AuthorAvatar(
+                      uid: member['uid'] as String?,
+                      role: member['role'] as String?,
+                      radius: 12,
+                    ),
                     label: Text(
                       '${member['name'] ?? '이름 없음'} · ${member['role'] ?? '역할 미설정'}',
                     ),
@@ -1682,15 +2170,19 @@ class DiaryCard extends StatelessWidget {
     required this.body,
     required this.likes,
     required this.comments,
-    this.avatar = '👤',
+    this.authorUid,
+    this.authorRole,
     this.isLiked = false,
     this.onLike,
+    this.onComment,
     super.key,
   });
-  final String name, mood, body, avatar;
+  final String name, mood, body;
+  final String? authorUid, authorRole;
   final int likes, comments;
   final bool isLiked;
   final VoidCallback? onLike;
+  final VoidCallback? onComment;
   @override
   Widget build(BuildContext context) => Card(
     child: Padding(
@@ -1700,7 +2192,7 @@ class DiaryCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              CircleAvatar(child: Text(avatar)),
+              AuthorAvatar(uid: authorUid, role: authorRole),
               const SizedBox(width: 10),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1732,7 +2224,7 @@ class DiaryCard extends StatelessWidget {
                 label: Text('$likes'),
               ),
               TextButton.icon(
-                onPressed: () {},
+                onPressed: onComment,
                 icon: const Icon(CupertinoIcons.chat_bubble, size: 18),
                 label: Text('$comments'),
               ),
@@ -1825,9 +2317,32 @@ class SettingsPage extends StatelessWidget {
         Card(
           child: Column(
             children: [
-              setting(CupertinoIcons.person_2, '가족 관리', '초대 코드 · 구성원'),
-              setting(CupertinoIcons.paw, '반려견 설정', '프로필 · 커스터마이징'),
-              setting(CupertinoIcons.bell, '알림', '돌봄 · 댓글 · 일정'),
+              setting(
+                CupertinoIcons.person_2,
+                '가족 관리',
+                '초대 코드 · 구성원',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const FamilyManagementScreen()),
+                ),
+              ),
+              setting(
+                CupertinoIcons.paw,
+                '반려견 설정',
+                '프로필 · 커스터마이징',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => PetSetup(onDone: () => Navigator.of(context).pop()),
+                  ),
+                ),
+              ),
+              setting(
+                CupertinoIcons.bell,
+                '알림',
+                '돌봄 · 댓글 · 일정',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const NotificationSettingsScreen()),
+                ),
+              ),
               ListTile(
                 leading: const Icon(CupertinoIcons.lock_shield),
                 title: const Text('개인정보 처리방침'),
@@ -1854,9 +2369,33 @@ class SettingsPage extends StatelessWidget {
         Card(
           child: Column(
             children: [
-              setting(CupertinoIcons.paintbrush, '화면 설정', '테마 · 글자 크기'),
-              setting(CupertinoIcons.question_circle, '도움말', '자주 묻는 질문'),
-              setting(CupertinoIcons.info_circle, '앱 정보', 'MIRA 1.0.0'),
+              setting(
+                CupertinoIcons.paintbrush,
+                '화면 설정',
+                '글자 크기',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const DisplaySettingsScreen()),
+                ),
+              ),
+              setting(
+                CupertinoIcons.question_circle,
+                '도움말',
+                '자주 묻는 질문',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const HelpScreen()),
+                ),
+              ),
+              setting(
+                CupertinoIcons.info_circle,
+                '앱 정보',
+                'MIRA 1.0.0',
+                onTap: () => showAboutDialog(
+                  context: context,
+                  applicationName: 'MIRA',
+                  applicationVersion: '1.0.0',
+                  applicationLegalese: '팀 에이원하조',
+                ),
+              ),
             ],
           ),
         ),
@@ -1865,17 +2404,417 @@ class SettingsPage extends StatelessWidget {
           child: ListTile(
             leading: const Icon(CupertinoIcons.square_arrow_right, color: Colors.red),
             title: const Text('로그아웃', style: TextStyle(color: Colors.red)),
-            onTap: () => AuthService.instance.signOut(),
+            onTap: () async {
+              await AuthService.instance.signOut();
+              if (context.mounted) {
+                Navigator.of(context).pushAndRemoveUntil(
+                  MaterialPageRoute(
+                    builder: (_) => const AppFlow(skipOnboarding: true),
+                  ),
+                  (_) => false,
+                );
+              }
+            },
           ),
         ),
       ],
     ),
   );
-  static Widget setting(IconData icon, String title, String sub) => ListTile(
+  static Widget setting(
+    IconData icon,
+    String title,
+    String sub, {
+    VoidCallback? onTap,
+  }) => ListTile(
     leading: Icon(icon),
     title: Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
     subtitle: Text(sub),
     trailing: const Icon(CupertinoIcons.chevron_right),
+    onTap: onTap,
+  );
+}
+
+class FamilyManagementScreen extends StatefulWidget {
+  const FamilyManagementScreen({super.key});
+  @override
+  State<FamilyManagementScreen> createState() => _FamilyManagementScreenState();
+}
+
+class _FamilyManagementScreenState extends State<FamilyManagementScreen> {
+  bool _loading = true;
+  String? _familyId;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final familyId = uid == null ? null : await FamilyService.instance.fetchMyFamilyId(uid);
+    if (mounted) {
+      setState(() {
+        _familyId = familyId;
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    return Scaffold(
+      appBar: AppBar(title: const Text('가족 관리')),
+      body: uid == null
+          ? const Center(child: Text('로그인이 필요해요.'))
+          : _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _familyId == null
+          ? _JoinOrCreateFamilyForm(
+              onSuccess: (familyId) => setState(() => _familyId = familyId),
+            )
+          : _FamilyDetails(familyId: _familyId!),
+    );
+  }
+}
+
+class _FamilyDetails extends StatelessWidget {
+  const _FamilyDetails({required this.familyId});
+  final String familyId;
+
+  @override
+  Widget build(BuildContext context) => ListView(
+    padding: const EdgeInsets.all(20),
+    children: [
+      const Text('초대 코드', style: TextStyle(fontWeight: FontWeight.w700)),
+      const SizedBox(height: 8),
+      Card(
+        child: ListTile(
+          title: Text(
+            familyId,
+            style: const TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 2,
+            ),
+          ),
+          subtitle: const Text('가족에게 이 코드를 공유해주세요'),
+          trailing: IconButton(
+            icon: const Icon(CupertinoIcons.doc_on_doc),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: familyId));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('초대 코드를 복사했어요.')),
+              );
+            },
+          ),
+        ),
+      ),
+      const SizedBox(height: 24),
+      const Text('가족 구성원', style: TextStyle(fontWeight: FontWeight.w700)),
+      const SizedBox(height: 8),
+      StreamBuilder<List<Map<String, dynamic>>>(
+        stream: FamilyService.instance.watchFamilyMembers(familyId),
+        builder: (context, memberSnapshot) {
+          final members = memberSnapshot.data ?? const [];
+          if (members.isEmpty) {
+            return const Padding(
+              padding: EdgeInsets.all(12),
+              child: Text('구성원이 없어요.'),
+            );
+          }
+          return Card(
+            child: Column(
+              children: [
+                for (final member in members)
+                  ListTile(
+                    leading: AuthorAvatar(
+                      uid: member['uid'] as String?,
+                      role: member['role'] as String?,
+                    ),
+                    title: Text(member['name'] as String? ?? '이름 없음'),
+                    subtitle: Text(member['role'] as String? ?? ''),
+                  ),
+              ],
+            ),
+          );
+        },
+      ),
+    ],
+  );
+}
+
+class _JoinOrCreateFamilyForm extends StatefulWidget {
+  const _JoinOrCreateFamilyForm({required this.onSuccess});
+  final ValueChanged<String> onSuccess;
+  @override
+  State<_JoinOrCreateFamilyForm> createState() => _JoinOrCreateFamilyFormState();
+}
+
+class _JoinOrCreateFamilyFormState extends State<_JoinOrCreateFamilyForm> {
+  String role = '딸';
+  bool _submitting = false;
+  String? _errorText;
+  final _inviteCodeController = TextEditingController();
+
+  @override
+  void dispose() {
+    _inviteCodeController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _handleCreate() async {
+    setState(() {
+      _submitting = true;
+      _errorText = null;
+    });
+    try {
+      final result = await FamilyService.instance.createFamily(role);
+      widget.onSuccess(result['familyId'] as String);
+    } on FamilyServiceException catch (e) {
+      setState(() => _errorText = e.message);
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  Future<void> _handleJoin() async {
+    final inviteCode = _inviteCodeController.text.trim();
+    if (inviteCode.isEmpty) {
+      setState(() => _errorText = '초대 코드를 입력해주세요.');
+      return;
+    }
+    setState(() {
+      _submitting = true;
+      _errorText = null;
+    });
+    try {
+      final result = await FamilyService.instance.joinFamily(inviteCode, role);
+      widget.onSuccess(result['familyId'] as String);
+    } on FamilyServiceException catch (e) {
+      setState(() => _errorText = e.message);
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => ListView(
+    padding: const EdgeInsets.all(20),
+    children: [
+      const Text(
+        '아직 가족에 소속되어 있지 않아요',
+        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+      ),
+      const SizedBox(height: 6),
+      const Text(
+        '가족을 새로 만들거나, 초대 코드로 참여해보세요.',
+        style: TextStyle(color: Colors.black54),
+      ),
+      const SizedBox(height: 20),
+      const Text('내 역할', style: TextStyle(fontWeight: FontWeight.w700)),
+      const SizedBox(height: 10),
+      Wrap(
+        spacing: 8,
+        children: familyRoles
+            .map(
+              (e) => ChoiceChip(
+                avatar: Text(_roleEmoji[e]!),
+                label: Text(e),
+                selected: role == e,
+                onSelected: (_) => setState(() => role = e),
+              ),
+            )
+            .toList(),
+      ),
+      if (_errorText != null) ...[
+        const SizedBox(height: 12),
+        Text(_errorText!, style: const TextStyle(color: Colors.red)),
+      ],
+      const SizedBox(height: 24),
+      const Text('처음이신가요?', style: TextStyle(fontWeight: FontWeight.w700)),
+      const SizedBox(height: 10),
+      SizedBox(
+        width: double.infinity,
+        child: FilledButton(
+          onPressed: _submitting ? null : _handleCreate,
+          child: _submitting
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('가족 코드 생성하기'),
+        ),
+      ),
+      const SizedBox(height: 24),
+      const Divider(),
+      const SizedBox(height: 16),
+      const Text('이미 가족 코드가 있으신가요?', style: TextStyle(fontWeight: FontWeight.w700)),
+      const SizedBox(height: 10),
+      TextField(
+        controller: _inviteCodeController,
+        textCapitalization: TextCapitalization.characters,
+        decoration: const InputDecoration(
+          labelText: '가족 초대 코드',
+          hintText: '가족에게 받은 코드를 입력하세요',
+        ),
+      ),
+      const SizedBox(height: 10),
+      SizedBox(
+        width: double.infinity,
+        child: OutlinedButton(
+          onPressed: _submitting ? null : _handleJoin,
+          child: const Text('가족 코드 등록하기'),
+        ),
+      ),
+    ],
+  );
+}
+
+class NotificationSettingsScreen extends StatefulWidget {
+  const NotificationSettingsScreen({super.key});
+  @override
+  State<NotificationSettingsScreen> createState() => _NotificationSettingsScreenState();
+}
+
+class _NotificationSettingsScreenState extends State<NotificationSettingsScreen> {
+  static const _careKey = 'notif_care_v1';
+  static const _commentKey = 'notif_comment_v1';
+  static const _scheduleKey = 'notif_schedule_v1';
+
+  bool _care = true;
+  bool _comment = true;
+  bool _schedule = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final prefs = SharedPreferencesAsync();
+    final care = await prefs.getBool(_careKey);
+    final comment = await prefs.getBool(_commentKey);
+    final schedule = await prefs.getBool(_scheduleKey);
+    if (mounted) {
+      setState(() {
+        _care = care ?? true;
+        _comment = comment ?? true;
+        _schedule = schedule ?? true;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('알림')),
+    body: ListView(
+      children: [
+        SwitchListTile(
+          title: const Text('돌봄 알림'),
+          subtitle: const Text('가족이 반려동물을 돌봐야 할 때 알려드려요'),
+          value: _care,
+          onChanged: (v) {
+            setState(() => _care = v);
+            SharedPreferencesAsync().setBool(_careKey, v);
+          },
+        ),
+        SwitchListTile(
+          title: const Text('댓글 알림'),
+          subtitle: const Text('가족이 내 기록에 댓글을 남기면 알려드려요'),
+          value: _comment,
+          onChanged: (v) {
+            setState(() => _comment = v);
+            SharedPreferencesAsync().setBool(_commentKey, v);
+          },
+        ),
+        SwitchListTile(
+          title: const Text('일정 알림'),
+          subtitle: const Text('다가오는 가족 일정을 알려드려요'),
+          value: _schedule,
+          onChanged: (v) {
+            setState(() => _schedule = v);
+            SharedPreferencesAsync().setBool(_scheduleKey, v);
+          },
+        ),
+      ],
+    ),
+  );
+}
+
+class DisplaySettingsScreen extends StatelessWidget {
+  const DisplaySettingsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('화면 설정')),
+    body: Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('글자 크기', style: TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 12),
+          ValueListenableBuilder<double>(
+            valueListenable: textScaleNotifier,
+            builder: (context, scale, _) => Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Slider(
+                  value: scale,
+                  min: 0.85,
+                  max: 1.3,
+                  divisions: 9,
+                  label: '${(scale * 100).round()}%',
+                  onChanged: (v) {
+                    textScaleNotifier.value = v;
+                    SharedPreferencesAsync().setDouble(textScaleKey, v);
+                  },
+                ),
+                const SizedBox(height: 8),
+                const Text('가족과 함께 볼 땐 이 정도가 딱 좋아요.'),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class HelpScreen extends StatelessWidget {
+  const HelpScreen({super.key});
+
+  static const _faq = [
+    ('MIRA는 무엇인가요?', '가족이 함께 반려동물을 돌보며 서로의 하루를 나누는 앱이에요.'),
+    ('가족 초대 코드는 어디서 확인하나요?', '설정 → 가족 관리에서 확인하고 공유할 수 있어요.'),
+    ('반려견 사진 분석은 어떻게 하나요?', '반려견 설정에서 사진을 올리고 "AI로 분석하기"를 누르면 품종과 색상을 자동으로 알려줘요.'),
+    ('내 기록은 가족에게 전부 공개되나요?', '가족 이야기에 직접 작성한 내용만 공개되고, 개인 정보는 안전하게 보호돼요.'),
+  ];
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('도움말')),
+    body: ListView(
+      children: [
+        for (final item in _faq)
+          ExpansionTile(
+            title: Text(item.$1, style: const TextStyle(fontWeight: FontWeight.w700)),
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(item.$2, style: const TextStyle(color: Colors.black54)),
+                ),
+              ),
+            ],
+          ),
+      ],
+    ),
   );
 }
 
@@ -1897,18 +2836,245 @@ class _ProfileCard extends StatelessWidget {
         final data = snapshot.data?.data();
         final name = data?['name'] as String? ?? '이름 없음';
         final role = data?['role'] as String?;
-        const emoji = _roleEmoji;
         return Card(
           child: ListTile(
-            leading: CircleAvatar(child: Text(emoji[role] ?? '👤')),
+            leading: AuthorAvatar(uid: uid, role: role),
             title: Text(name, style: const TextStyle(fontWeight: FontWeight.w700)),
             subtitle: Text(role != null ? '우리 가족 · $role' : '역할 미설정'),
             trailing: const Icon(CupertinoIcons.chevron_right),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const ProfileEditScreen()),
+            ),
           ),
         );
       },
     );
   }
+}
+
+class ProfileEditScreen extends StatefulWidget {
+  const ProfileEditScreen({super.key});
+  @override
+  State<ProfileEditScreen> createState() => _ProfileEditScreenState();
+}
+
+class _ProfileEditScreenState extends State<ProfileEditScreen> {
+  final _nameController = TextEditingController();
+  final _birthdayController = TextEditingController();
+  DateTime? _birthday;
+  bool _loading = true;
+  bool _saving = false;
+  bool _pickingPhoto = false;
+  String? _error;
+  String? _existingPhotoBase64;
+  Uint8List? _newPhotoBytes;
+  bool _removePhoto = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _birthdayController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+    final doc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+    final data = doc.data();
+    _nameController.text = data?['name'] as String? ?? '';
+    _existingPhotoBase64 = data?['photo'] as String?;
+    final birthdayStr = data?['birthday'] as String?;
+    if (birthdayStr != null) {
+      final parsed = DateTime.tryParse(birthdayStr);
+      if (parsed != null) {
+        _birthday = parsed;
+        _birthdayController.text =
+            '${parsed.year}. ${parsed.month.toString().padLeft(2, '0')}. ${parsed.day.toString().padLeft(2, '0')}';
+      }
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _pickBirthday() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _birthday ?? DateTime(now.year - 20, now.month, now.day),
+      firstDate: DateTime(1900),
+      lastDate: now,
+    );
+    if (picked != null) {
+      setState(() {
+        _birthday = picked;
+        _birthdayController.text =
+            '${picked.year}. ${picked.month.toString().padLeft(2, '0')}. ${picked.day.toString().padLeft(2, '0')}';
+      });
+    }
+  }
+
+  Future<void> _pickPhoto() async {
+    setState(() {
+      _pickingPhoto = true;
+      _error = null;
+    });
+    try {
+      final file = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 512,
+        maxHeight: 512,
+        imageQuality: 70,
+      );
+      if (file == null) return;
+      final bytes = await file.readAsBytes();
+      if (bytes.length > 300 * 1024) {
+        if (mounted) setState(() => _error = '프로필 사진은 300KB 이하로 선택해 주세요.');
+        return;
+      }
+      final decoded = await decodeImageFromList(bytes);
+      decoded.dispose();
+      if (mounted) {
+        setState(() {
+          _newPhotoBytes = bytes;
+          _removePhoto = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _error = '사진을 열지 못했어요. 사진 접근 권한을 확인해 주세요.');
+    } finally {
+      if (mounted) setState(() => _pickingPhoto = false);
+    }
+  }
+
+  void _clearPhoto() {
+    setState(() {
+      _newPhotoBytes = null;
+      _existingPhotoBase64 = null;
+      _removePhoto = true;
+    });
+  }
+
+  Future<void> _save() async {
+    final name = _nameController.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = '이름을 입력해주세요.');
+      return;
+    }
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(uid).set({
+        'name': name,
+        if (_birthday != null)
+          'birthday':
+              '${_birthday!.year}-${_birthday!.month.toString().padLeft(2, '0')}-${_birthday!.day.toString().padLeft(2, '0')}',
+        if (_newPhotoBytes != null) 'photo': base64Encode(_newPhotoBytes!),
+        if (_removePhoto && _newPhotoBytes == null) 'photo': FieldValue.delete(),
+      }, SetOptions(merge: true));
+      if (mounted) Navigator.of(context).pop();
+    } catch (_) {
+      if (mounted) setState(() => _error = '저장하지 못했어요. 다시 시도해주세요.');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('프로필 수정')),
+    body: _loading
+        ? const Center(child: CircularProgressIndicator())
+        : ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              Center(
+                child: Column(
+                  children: [
+                    GestureDetector(
+                      onTap: _pickingPhoto ? null : _pickPhoto,
+                      child: CircleAvatar(
+                        radius: 48,
+                        backgroundImage: _newPhotoBytes != null
+                            ? MemoryImage(_newPhotoBytes!)
+                            : _existingPhotoBase64 != null
+                            ? MemoryImage(base64Decode(_existingPhotoBase64!))
+                            : null,
+                        child: _pickingPhoto
+                            ? const CircularProgressIndicator(strokeWidth: 2)
+                            : (_newPhotoBytes == null && _existingPhotoBase64 == null)
+                            ? const Icon(CupertinoIcons.camera, size: 28)
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        TextButton(
+                          onPressed: _pickingPhoto ? null : _pickPhoto,
+                          child: const Text('사진 바꾸기'),
+                        ),
+                        if (_newPhotoBytes != null || _existingPhotoBase64 != null)
+                          TextButton(
+                            onPressed: _clearPhoto,
+                            child: const Text('사진 제거'),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _nameController,
+                decoration: const InputDecoration(labelText: '이름', hintText: '이름을 입력하세요'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _birthdayController,
+                readOnly: true,
+                onTap: _pickBirthday,
+                decoration: const InputDecoration(
+                  labelText: '생년월일',
+                  hintText: '예) 2002. 03. 14',
+                  suffixIcon: Icon(CupertinoIcons.calendar),
+                ),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 12),
+                Text(_error!, style: const TextStyle(color: Colors.red)),
+              ],
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: _saving ? null : _save,
+                  style: FilledButton.styleFrom(padding: const EdgeInsets.all(18)),
+                  child: _saving
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('저장하기'),
+                ),
+              ),
+            ],
+          ),
+  );
 }
 
 class QuestCard extends StatelessWidget {
