@@ -13,8 +13,10 @@
 ### 강아지 캐릭터 생성 (`emotion/photo.ipynb` 이식, `Backend/character-server/`)
 - `emotion/photo.ipynb`(Stable Diffusion 1.5 + rembg, 견종/색상/성격 → 마스코트 이미지)를 `Backend/character-server/app.py`로 정리해서 옮김. 노트북 파일 자체의 인코딩이 깨져 있어 한글 딕셔너리 키(BREED_MAP 등)는 새로 정리함 — `character-server/README.md` 참고.
 - PetSetup 화면(반려견 프로필 설정)에 "AI 캐릭터 만들기" 버튼을 추가해서 `/generate`를 호출하고, 결과 이미지를 미리보기 후 저장하면 홈 화면 아바타로 표시된다(`character_save_service.dart`, 기기 로컬 저장).
-- `emotion/FINAL.ipynb`의 LoRA 파인튜닝(실제 반려견 사진으로 학습)은 포함하지 않음 — GPU로 수 분 이상 걸리는 오프라인 작업이라 실시간 앱 흐름에 안 맞음. 대신 "사진으로 만들기"는 기존 `/analyze-pet-photo`(품종/색상 추출) 결과를 그대로 `/generate`에 넘기는 절충안으로 구현.
-- ⚠️ **GPU가 필요해서 로컬/이 저장소만으로는 실행 불가** — Colab에서 띄우고 ngrok 주소를 앱에 설정해야 실제로 이미지가 생성됨 (README의 실행 방법 참고). 이 세션에서는 GPU가 없어 실제 생성 테스트는 못 했고, `dart analyze`/`flutter test`만 통과 확인함.
+- **Colab GPU에서 실제로 띄워서 그림체를 여러 번 튜닝한 끝에 확정함**: `assets/dog/baby_idle.png`(기존 강아지방 캐릭터)를 img2img 기준 이미지로 항상 사용하고, 텍스트(품종/색상/성격)만 프롬프트로 반영하는 방식(`strength=0.6`)으로 스타일을 고정했다. txt2img 단독으로는 실행마다 그림체가 크게 달라졌고, img2img라도 strength가 0.68 이상이면 형태가 깨지고 0.5 이하면 기준 이미지에서 거의 안 벗어났다.
+- **업로드한 실제 반려견 사진 자체를 img2img 기준으로 쓰는 것은 시도했다가 포기함** — 사진마다 결과가 너무 불안정했다(형태 붕괴 또는 사진을 거의 그대로 잘라붙인 듯한 결과). "사진으로 만들기"는 여전히 `/analyze-pet-photo`(품종/색상 텍스트 추출) 결과만 `/generate`에 넘기는 절충안으로 유지.
+- `emotion/FINAL.ipynb`의 LoRA 파인튜닝(실제 반려견 사진으로 학습)은 포함하지 않음 — GPU로 수십 분 걸리는 오프라인 작업이라 실시간 앱 흐름에 안 맞음.
+- ⚠️ **GPU가 필요해서 로컬/이 저장소만으로는 실행 불가** — Colab에서 띄우고 ngrok 주소를 앱에 설정해야 실제로 이미지가 생성됨 (README의 실행 방법 참고). Colab GPU에서 실제 생성 결과까지 확인 완료.
 
 ### AI 서버 (`Backend/ai-server/`)
 - Colab 프로토타입(감정 분석 + 공감 메시지 생성)을 실제 FastAPI 서비스로 이전
