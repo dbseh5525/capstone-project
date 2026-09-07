@@ -88,7 +88,15 @@ class _MemoryPageState extends State<MemoryPage> {
 
   @override
   Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    // MainShell의 IndexedStack에 항상 붙어있는 탭이라, Firebase 미설정 환경에서
+    // FirebaseAuth.instance가 던지는 예외를 그대로 두면 다른 탭까지 에러로 덮인다.
+    String? maybeUid;
+    try {
+      maybeUid = FirebaseAuth.instance.currentUser?.uid;
+    } catch (_) {
+      /* 로그인 안내로 대체 */
+    }
+    final uid = maybeUid;
     if (uid == null) {
       return const Center(child: Text('로그인 후 사진첩을 볼 수 있어요.'));
     }

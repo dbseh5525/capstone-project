@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
 import 'package:mira/main.dart';
 import 'package:mira/dog_room/controllers/dog_controller.dart';
 import 'package:mira/dog_room/models/dog_state.dart';
@@ -103,37 +102,19 @@ void main() {
     expect(find.byType(AuthScreen), findsOneWidget);
   });
 
-  testWidgets('선택한 사진과 짧은 글을 사진첩에 저장한다', (tester) async {
+  // 사진첩이 로컬 저장(MemoryStore)에서 Firestore 기반(PhotoService)으로 바뀌면서,
+  // 업로드·좋아요·댓글·삭제 같은 실제 데이터 흐름은 더 이상 이 테스트 파일만으로는
+  // 검증할 수 없다 — family_service/photo_service 등이 FirebaseFirestore.instance를
+  // 직접 참조해서 fake_cloud_firestore 같은 걸 끼워 넣으려면 서비스들이 인스턴스를
+  // 주입받는 구조로 먼저 바뀌어야 한다. 그 전까지는 "로그인 안 했을 때 안내 문구만
+  // 보여주고 죽지 않는다" 정도의 스모크 테스트로 대체한다.
+  testWidgets('로그인하지 않으면 사진첩 대신 안내 문구를 보여준다', (tester) async {
     await phone(tester);
-    final oldPicker = ImagePickerPlatform.instance;
-    final photo = await rootBundle.load('assets/dog/baby_idle.png');
-    ImagePickerPlatform.instance = _PhotoPicker(
-      XFile.fromData(
-        photo.buffer.asUint8List(),
-        name: 'bori.png',
-        mimeType: 'image/png',
-      ),
+    await tester.pumpWidget(
+      const MiraApp(home: Scaffold(body: MemoryPage(active: true))),
     );
-    addTearDown(() => ImagePickerPlatform.instance = oldPicker);
-    await tester.pumpWidget(const MiraApp(home: Scaffold(body: MemoryPage())));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('사진과 글 올리기'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('사진 선택 (0/8)'));
-    await tester.runAsync(() async {
-      await Future<void>.delayed(const Duration(milliseconds: 300));
-    });
-    await tester.pumpAndSettle();
-    expect(find.text('사진 선택 (1/8)'), findsOneWidget);
-    await tester.enterText(find.byType(TextField), '보리와 함께한 첫 하루');
-    await tester.ensureVisible(find.text('사진첩에 저장'));
-    await tester.tap(find.text('사진첩에 저장'));
-    await tester.pumpAndSettle();
-    final result = await MemoryStore().load();
-    expect(result.length, 9);
-    expect(result.first.asset, isFalse);
-    expect(result.first.body, '보리와 함께한 첫 하루');
-    expect(result.first.bytes, photo.buffer.asUint8List());
+    await tester.pump();
+    expect(find.text('로그인 후 사진첩을 볼 수 있어요.'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -215,71 +196,12 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('4열 사진첩의 좋아요와 댓글은 재실행 후에도 남는다', (tester) async {
-    await phone(tester);
-    await tester.pumpWidget(const MiraApp(home: Scaffold(body: MemoryPage())));
-    await tester.pumpAndSettle();
-    final grid = tester.widget<SliverGrid>(find.byType(SliverGrid));
-    expect(
-      (grid.gridDelegate as SliverGridDelegateWithFixedCrossAxisCount)
-          .crossAxisCount,
-      4,
-    );
-    final first = tester.getRect(find.byType(MemoryPhoto).at(0));
-    final fourth = tester.getRect(find.byType(MemoryPhoto).at(3));
-    expect(first.top, fourth.top);
-    expect(first.width, lessThan(100));
-    await capture(tester, 'album');
-    await tester.tap(find.byType(MemoryPhoto).first);
-    await tester.pumpAndSettle();
-    await capture(tester, 'memory-detail');
-    await tester.ensureVisible(find.text('좋아요 0'));
-    await tester.tap(find.text('좋아요 0'));
-    await tester.pumpAndSettle();
-    await tester.ensureVisible(find.byType(TextField));
-    await tester.enterText(find.byType(TextField), '우리 보리 정말 귀엽다');
-    await tester.ensureVisible(find.text('댓글 등록'));
-    await tester.tap(find.text('댓글 등록'));
-    await tester.pumpAndSettle();
-    final reloaded = await MemoryStore().load();
-    expect(reloaded.first.liked, isTrue);
-    expect(reloaded.first.comments, ['우리 보리 정말 귀엽다']);
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pumpWidget(const MiraApp(home: Scaffold(body: MemoryPage())));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byType(MemoryPhoto).first);
-    await tester.pumpAndSettle();
-    expect(find.text('좋아요 1'), findsOneWidget);
-    await tester.ensureVisible(find.text('우리 보리 정말 귀엽다'));
-    expect(find.text('우리 보리 정말 귀엽다'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('사진 삭제를 취소하면 유지하고 확인하면 저장소에서도 지운다', (tester) async {
-    await phone(tester);
-    await tester.pumpWidget(const MiraApp(home: Scaffold(body: MemoryPage())));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byType(MemoryPhoto).first);
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('사진 삭제'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('취소'));
-    await tester.pumpAndSettle();
-    expect((await MemoryStore().load()).length, 8);
-    await tester.tap(find.byTooltip('사진 삭제'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('삭제'));
-    await tester.pumpAndSettle();
-    expect((await MemoryStore().load()).length, 7);
-    expect(find.byType(MemoryPage), findsOneWidget);
-  });
-
   testWidgets('320px 화면과 큰 글자에서 개인정보·사진첩·펫이 넘치지 않는다', (tester) async {
     await phone(tester, width: 320, height: 640);
     final dog = DogController(_DogStorage());
     for (final page in [
       PrivacyScreen(onDone: () {}),
-      const Scaffold(body: MemoryPage()),
+      const Scaffold(body: MemoryPage(active: true)),
       PetPage(controller: dog),
     ]) {
       await tester.pumpWidget(
@@ -347,13 +269,4 @@ class _DogStorage implements DogSaveService {
   Future<void> save(DogState state) async {
     this.state = state;
   }
-}
-
-class _PhotoPicker extends ImagePickerPlatform {
-  _PhotoPicker(this.photo);
-  final XFile photo;
-  @override
-  Future<List<XFile>> getMultiImageWithOptions({
-    MultiImagePickerOptions options = const MultiImagePickerOptions(),
-  }) async => [photo];
 }
